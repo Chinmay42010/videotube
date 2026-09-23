@@ -9,17 +9,27 @@ import {
 
 const registerUser = asyncHandler(async (req, res) => {
     // accept both `fullname` and `fullName` (client often sends camelCase)
-    const { fullname: _fullname, fullName, email, username, password } = req.body;
+    const {
+        fullname: _fullname,
+        fullName,
+        email,
+        username,
+        password,
+    } = req.body;
     const fullname = _fullname || fullName;
 
     // validation - show which field is missing for easier debugging
-    if (
-        [fullname, email, username, password].some(
-            (field) => !field?.trim(),
-        )
-    ) {
-        console.log("registerUser: req.body =", req.body, "req.files =", req.files);
-        throw new ApiError(400, `All fields are required. Received: fullname=${fullname}, email=${email}, username=${username}, password=${password ? "***" : password}`);
+    if ([fullname, email, username, password].some((field) => !field?.trim())) {
+        console.log(
+            "registerUser: req.body =",
+            req.body,
+            "req.files =",
+            req.files,
+        );
+        throw new ApiError(
+            400,
+            `All fields are required. Received: fullname=${fullname}, email=${email}, username=${username}, password=${password ? "***" : password}`,
+        );
     }
 
     const existingUser = await User.findOne({
@@ -103,9 +113,82 @@ const registerUser = asyncHandler(async (req, res) => {
         if (error instanceof ApiError) throw error;
         throw new ApiError(
             500,
-            error?.message || "Something went wrong while registering a user & images were deleted",
+            error?.message ||
+                "Something went wrong while registering a user & images were deleted",
         );
     }
 });
 
-export { registerUser };
+const generateAccessAndrefreshToken = async (userId) => {
+    try {
+        const user = await User.findById(userId);
+
+        if (!user) {
+            throw new ApiErrorError(404, "User not found");
+        }
+
+        const refreshToken = user.generateAccessToken();
+        const accessToken = user.generateRefreshToken();
+
+        user.refreshToken = refreshToken;
+        await user.save({ validateBeforeSave: false });
+        return { accessToken, refreshToken };
+    } catch (error) {
+        throw new ApiError(
+            500,
+            "Something went wrong while generatig access & refresh tokens",
+        );
+    }
+};
+
+const loginUser = asyncHandler(async (req, res) => {
+    // get data from body
+    const { email, username, password } = req.body;
+
+    // validation
+    if (!email) {
+        throw new ApiError(400, "Email is required");
+    }
+
+    const user = await User.findOne({
+        $or: [{ username }, { email }],
+    });
+
+    if (!user) {
+        throw new ApiError(404, "User not found");
+    }
+
+    // validate password
+    const isPasswordvalid = await user.isPasswordCorrect(password);
+
+    if (!isPasswordvalid) {
+        throw new ApiError(401, "Invalid credentials");
+    }
+
+    const { accessToken, refreshToken } = await generateAccessAndrefreshToken(
+        user._id,
+    );
+
+    const loggedInUser = await User.findById(user._id).select(
+        "-password -refreshtoken",
+    );
+
+    if (!loggedInUser) {
+        throw new ApiError(400, "Login unsuccessful");
+    }
+
+    const options = {
+        httOnly: true,
+        secure: process.env.NODE_ENV === "production",
+    };
+
+    return res
+        .status(200)
+        .cookie("accesstoken", accessToken, options)
+        .cookie("refreshToken", refreshToken, options)
+        .json(
+            new ApiResponse(200, loggedInUser, "User logged in successfully"),
+        );
+});
+
+export { registerUser, loginUser };
